@@ -1,3 +1,4 @@
+xss-labs.abay.sh/xss/1.php?q=
 example.com
 testphp.vulnweb.com
 insecure-website.com
