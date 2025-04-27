@@ -147,13 +147,12 @@ def extract_links_and_forms(url):
             href = tag['href']
             if href.startswith("javascript:") or href.startswith("#"):
                 continue
-            full_url = urllib.parse.urljoin(url, href)
-            links.append(full_url)
-
+            links.append(href)
         forms = soup.find_all("form")
     except Exception:
         pass
     return links, forms
+
 
 def build_payload_url(url, param_name, payload):
     parsed = urllib.parse.urlparse(url)
@@ -233,9 +232,24 @@ def audit_form(url, form):
                 except Exception:
                     pass
 
+def is_file_like(path):
+    if path.endswith('/'):
+        return False
+    else:
+        return True
+
 def crawl_and_audit(start_url):
     q = queue.Queue()
     q.put(start_url)
+
+    parsed_start = urllib.parse.urlparse(start_url)
+    base_domain = parsed_start.netloc
+    base_path = parsed_start.path
+
+    base_is_file = is_file_like(base_path)
+
+    if not base_path:
+        base_path = '/'
 
     total = 0
 
@@ -247,11 +261,46 @@ def crawl_and_audit(start_url):
             visited_links.add(url)
             total += 1
 
+        parsed_url = urllib.parse.urlparse(url)
+
+        if parsed_url.netloc and parsed_url.netloc != base_domain:
+            continue
+
+        if base_is_file:
+            if parsed_url.path != parsed_start.path:
+                continue
+        else:
+            if not parsed_url.path.startswith(base_path):
+                continue
+
+        if parsed_url.query:
+            print(f"[*] Detected URL with parameters, testing direct injection: {url}")
+            test_direct_url(url)
+
         links, forms = extract_links_and_forms(url)
 
         for link in links:
-            if link not in visited_links:
-                q.put(link)
+            full_link = urllib.parse.urljoin(url, link)
+            parsed_full = urllib.parse.urlparse(full_link)
+
+            if parsed_full.netloc and parsed_full.netloc != base_domain:
+                continue
+
+            if base_is_file:
+                if parsed_full.path != parsed_start.path:
+                    continue
+            else:
+                if not parsed_full.path.startswith(base_path):
+                    continue
+
+            if parsed_full.query:
+                if full_link not in visited_links:
+                    print(f"[*] Detected URL with parameters (found inside page), testing direct injection: {full_link}")
+                    test_direct_url(full_link)
+                    visited_links.add(full_link)
+            else:
+                if full_link not in visited_links:
+                    q.put(full_link)
 
         for form in forms:
             audit_form(url, form)
