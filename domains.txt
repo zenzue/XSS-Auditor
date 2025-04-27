@@ -1,4 +1,5 @@
 xss-labs.abay.sh/xss/1.php?q=
 example.com
+example.com/folder/
 testphp.vulnweb.com
 insecure-website.com
