@@ -58,56 +58,37 @@ def send_telegram_alert(vuln_type, vulnerable_url):
         print(f"[!] Telegram error: {e}")
 
 def test_direct_url(url):
-    parsed = urllib.parse.urlparse(url)
-    base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-    query = parsed.query
-
-    if not query or "=" not in query:
+    if "?" not in url or "=" not in url:
         print(f"[-] No injectable parameters found in {url}")
         return False
 
-    params = urllib.parse.parse_qsl(query)
-    any_reflection_found = False
+    reflection_found = False
+    base, after_question = url.split('?', 1)
 
-    for param, value in params:
-        successful_payloads = []
+    if "=" in after_question:
+        inject_point = url.find("=") + 1
 
         for payload in NORMAL_PAYLOADS:
-            new_params = []
-            for k, v in params:
-                if k == param:
-                    new_params.append((k, payload))
-                else:
-                    new_params.append((k, v))
-            new_query = urllib.parse.urlencode(new_params)
-            test_url = f"{base_url}?{new_query}"
-
+            test_url = url[:inject_point] + urllib.parse.quote(payload)
             try:
                 res = requests.get(test_url, headers=HEADERS, timeout=TIMEOUT, verify=False)
                 if payload in res.text:
                     print(f"[+] Reflected XSS Found: {test_url} | Payload: {payload}")
-                    successful_payloads.append(payload)
-                    
                     results.append({
-                        "domain": parsed.netloc,
+                        "domain": urllib.parse.urlparse(url).netloc,
                         "vuln_type": "Reflected XSS (Direct Injection)",
                         "vulnerable_url": test_url,
-                        "parameter": param,
                         "payload": payload
                     })
                     send_telegram_alert("Reflected XSS (Direct Injection)", test_url)
-                    any_reflection_found = True
-
+                    reflection_found = True
             except Exception:
                 pass
 
-        if successful_payloads:
-            print(f"[+] {len(successful_payloads)} payloads reflected for parameter '{param}'")
-
-    if not any_reflection_found:
+    if not reflection_found:
         print(f"[-] No reflected parameter found in {url}")
 
-    return any_reflection_found
+    return reflection_found
 
 def extract_links_and_forms(url):
     links = []
